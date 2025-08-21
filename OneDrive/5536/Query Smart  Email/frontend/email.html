@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>QuerySmart Mail</title>
+  <style>
+    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; max-width: 980px; margin: 20px auto; padding: 0 16px}
+    .row{display:flex; gap:16px; flex-wrap:wrap}
+    .card{border:1px solid #e5e7eb; border-radius:12px; padding:16px; box-shadow: 0 1px 3px rgba(0,0,0,.05)}
+    input,textarea,button{width:100%; padding:10px; border-radius:8px; border:1px solid #d1d5db}
+    button{background:#111827; color:#fff; cursor:pointer}
+    button:disabled{opacity:.6}
+    .tabs{display:flex; gap:8px; margin: 8px 0 16px}
+    .tabs button{width:auto; padding:8px 12px; background:#f3f4f6; color:#111827}
+    .tabs button.active{background:#111827;color:#fff}
+    table{width:100%; border-collapse:collapse}
+    th,td{border-bottom:1px solid #eee; text-align:left; padding:8px}
+    .flex{display:flex; gap:8px}
+    .half{flex:1 1 48%}
+  </style>
+</head>
+<body>
+  <h1>QuerySmart Mail</h1>
+  <div class="card">
+    <div class="flex">
+      <input id="backendUrl" placeholder="Backend URL (e.g. https://lawncare-backend.onrender.com)" value="YOUR_BACKEND_URL">
+      <input id="adminToken" placeholder="Admin token" value="YOUR_ADMIN_TOKEN">
+      <button id="saveCfg">Save</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card half">
+      <h2>Compose</h2>
+      <input id="to" placeholder="To (comma-separated)">
+      <input id="subject" placeholder="Subject">
+      <textarea id="body" rows="8" placeholder="Write your message..."></textarea>
+      <button id="sendBtn">Send</button>
+      <div id="sendStatus"></div>
+    </div>
+
+    <div class="card half">
+      <h2>Inbox / Sent</h2>
+      <div class="tabs">
+        <button class="tabBtn active" data-folder="inbox">Inbox</button>
+        <button class="tabBtn" data-folder="sent">Sent</button>
+        <button id="refreshBtn" style="margin-left:auto;">Refresh</button>
+      </div>
+      <table id="list">
+        <thead><tr><th>From</th><th>Subject</th><th>Date</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Message</h2>
+    <div id="messageView">Select a message…</div>
+  </div>
+
+<script>
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const backendUrl = $("backendUrl");
+  const adminToken = $("adminToken");
+  const sendBtn = $("sendBtn");
+  const sendStatus = $("sendStatus");
+  const listTbody = document.querySelector("#list tbody");
+  const messageView = $("messageView");
+  const refreshBtn = $("refreshBtn");
+  let currentFolder = "inbox";
+  let cfg = {
+    backend: localStorage.getItem("qs_backend") || backendUrl.value,
+    token: localStorage.getItem("qs_token") || adminToken.value
+  };
+  backendUrl.value = cfg.backend;
+  adminToken.value = cfg.token;
+
+  function headers() {
+    return { "Content-Type": "application/json", "x-admin-token": cfg.token };
+  }
+
+  $("saveCfg").onclick = ()=>{
+    cfg.backend = backendUrl.value.trim();
+    cfg.token = adminToken.value.trim();
+    localStorage.setItem("qs_backend", cfg.backend);
+    localStorage.setItem("qs_token", cfg.token);
+    alert("Saved");
+  };
+
+  async function sendMail(){
+    sendBtn.disabled = true;
+    sendStatus.textContent = "Sending…";
+    try{
+      const res = await fetch(cfg.backend + "/api/email/send", {
+        method:"POST",
+        headers: headers(),
+        body: JSON.stringify({
+          to: $("to").value.split(",").map(s=>s.trim()).filter(Boolean),
+          subject: $("subject").value,
+          html: `<div>${$("body").value.replace(/\n/g,"<br>")}</div>`
+        })
+      });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.detail || "Send failed");
+      sendStatus.textContent = "✅ Sent";
+      $("to").value=""; $("subject").value=""; $("body").value="";
+      loadList(); // refresh
+    }catch(e){
+      sendStatus.textContent = "❌ " + e.message;
+    }finally{
+      sendBtn.disabled = false;
+    }
+  }
+  sendBtn.onclick = sendMail;
+
+  async function loadList(){
+    listTbody.innerHTML = `<tr><td colspan="3">Loading ${currentFolder}…</td></tr>`;
+    try{
+      const res = await fetch(`${cfg.backend}/api/email/inbox?folder=${currentFolder}&limit=50`, {
+        headers: headers()
+      });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.detail || "Load failed");
+      listTbody.innerHTML = "";
+      data.messages.forEach(m=>{
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${escapeHtml(m.from||"")}</td><td>${escapeHtml(m.subject||"")}</td><td>${escapeHtml(m.date||"")}</td>`;
+        tr.style.cursor="pointer";
+        tr.onclick = ()=>loadMessage(m.uid);
+        listTbody.appendChild(tr);
+      });
+      if(!data.messages.length){
+        listTbody.innerHTML = `<tr><td colspan="3">No messages.</td></tr>`;
+      }
+    }catch(e){
+      listTbody.innerHTML = `<tr><td colspan="3">❌ ${e.message}</td></tr>`;
+    }
+  }
+
+  async function loadMessage(uid){
+    messageView.innerHTML = "Loading message…";
+    try{
+      const res = await fetch(`${cfg.backend}/api/email/message?id=${encodeURIComponent(uid)}`, {
+        headers: headers()
+      });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.detail || "Load failed");
+      const headerHtml = `
+        <div><strong>From:</strong> ${escapeHtml(data.from||"")}</div>
+        <div><strong>Date:</strong> ${escapeHtml(data.date||"")}</div>
+        <div><strong>Subject:</strong> ${escapeHtml(data.subject||"")}</div>
+        <hr/>
+      `;
+      if(data.html){
+        messageView.innerHTML = headerHtml + sanitizeHtml(data.html);
+      }else{
+        messageView.innerHTML = headerHtml + `<pre>${escapeHtml(data.text||"")}</pre>`;
+      }
+    }catch(e){
+      messageView.textContent = "❌ " + e.message;
+    }
+  }
+
+  function sanitizeHtml(html){
+    // very light sanitizer for images/scripts
+    return html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+               .replace(/on\w+="[^"]*"/g, "")
+               .replace(/javascript:/gi, "");
+  }
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  document.querySelectorAll(".tabBtn").forEach(btn=>{
+    btn.onclick = ()=>{
+      document.querySelectorAll(".tabBtn").forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      currentFolder = btn.dataset.folder;
+      loadList();
+    }
+  });
+  refreshBtn.onclick = loadList;
+
+  loadList();
+})();
+</script>
+</body>
+</html>
